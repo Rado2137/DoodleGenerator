@@ -1,32 +1,21 @@
 from __future__ import print_function
-import time
-import argparse
-import numpy as np
-from scipy.optimize import fmin_l_bfgs_b
-from scipy.misc import imread, imsave
 
+import time
+
+import numpy as np
+# Command line arguments
+from Utils.Clustering import kmeans
+from Utils.Parser import parser
 from keras import backend as K
+from keras.applications import vgg19
 from keras.layers import Input, AveragePooling2D
 from keras.models import Model
 from keras.preprocessing.image import load_img, img_to_array
-from keras.applications import vgg19
+from scipy.misc import imread, imsave
+from scipy.optimize import fmin_l_bfgs_b
 
-# Command line arguments
-parser = argparse.ArgumentParser(description='Keras neural doodle example')
-parser.add_argument('--nlabels', type=int,
-                    help='number of semantic labels'
-                    ' (regions in differnet colors)'
-                    ' in style_mask/target_mask')
-parser.add_argument('--style-image', type=str,
-                    help='path to image to learn style from')
-parser.add_argument('--style-mask', type=str,
-                    help='path to semantic mask of style image')
-parser.add_argument('--target-mask', type=str,
-                    help='path to semantic mask of target image')
-parser.add_argument('--content-image', type=str, default=None,
-                    help='path to optional content image')
-parser.add_argument('--target-image-prefix', type=str,
-                    help='path prefix for generated results')
+from Utils.ImageUtils import *
+
 args = parser.parse_args()
 
 style_img_path = args.style_image
@@ -50,42 +39,6 @@ content_feature_layers = ['block5_conv2']
 # To get better generation qualities, use more conv layers for style features
 style_feature_layers = ['block1_conv1', 'block2_conv1', 'block3_conv1',
                         'block4_conv1', 'block5_conv1']
-
-
-# helper functions for reading/processing images
-def preprocess_image(image_path):
-    img = load_img(image_path, target_size=(img_nrows, img_ncols))
-    img = img_to_array(img)
-    img = np.expand_dims(img, axis=0)
-    img = vgg19.preprocess_input(img)
-    return img
-
-
-def deprocess_image(x):
-    if K.image_data_format() == 'channels_first':
-        x = x.reshape((3, img_nrows, img_ncols))
-        x = x.transpose((1, 2, 0))
-    else:
-        x = x.reshape((img_nrows, img_ncols, 3))
-    # Remove zero-center by mean pixel
-    x[:, :, 0] += 103.939
-    x[:, :, 1] += 116.779
-    x[:, :, 2] += 123.68
-    # 'BGR'->'RGB'
-    x = x[:, :, ::-1]
-    x = np.clip(x, 0, 255).astype('uint8')
-    return x
-
-
-def kmeans(xs, k):
-    assert xs.ndim == 2
-    try:
-        from sklearn.cluster import k_means
-        _, labels, _ = k_means(xs.astype('float64'), k)
-    except ImportError:
-        from scipy.cluster.vq import kmeans2
-        _, labels = kmeans2(xs, k, missing='raise')
-    return labels
 
 
 def load_mask_labels():
@@ -127,10 +80,10 @@ if K.image_data_format() == 'channels_first':
 else:
     shape = (1, img_nrows, img_ncols, num_colors)
 
-style_image = K.variable(preprocess_image(style_img_path))
+style_image = K.variable(preprocess_image(style_img_path, img_nrows, img_ncols))
 target_image = K.placeholder(shape=shape)
 if use_content_img:
-    content_image = K.variable(preprocess_image(content_img_path))
+    content_image = K.variable(preprocess_image(content_img_path, img_nrows, img_ncols))
 else:
     content_image = K.zeros(shape=shape)
 
@@ -318,7 +271,7 @@ for i in range(50):
                                      fprime=evaluator.grads, maxfun=20)
     print('Current loss value:', min_val)
     # save current generated image
-    img = deprocess_image(x.copy())
+    img = deprocess_image(x.copy(), img_nrows, img_ncols)
     fname = target_img_prefix + '_at_iteration_%d.png' % i
     imsave(fname, img)
     end_time = time.time()
