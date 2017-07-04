@@ -1,6 +1,6 @@
 import numpy as np
 
-from Program import eval_loss_and_grads
+from Program import lossEvaluation
 
 
 class Evaluator(object):
@@ -11,7 +11,7 @@ class Evaluator(object):
 
     def loss(self, x):
         assert self.loss_value is None
-        loss_value, grad_values = eval_loss_and_grads(x)
+        loss_value, grad_values = lossEvaluation(x)
         self.loss_value = loss_value
         self.grad_values = grad_values
         return self.loss_value

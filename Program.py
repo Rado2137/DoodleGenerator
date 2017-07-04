@@ -2,32 +2,25 @@ from __future__ import print_function
 
 import time
 
-import numpy as np
-# Command line arguments
-from Utils.Clustering import kmeans
-from Utils.Parser import parser
-from keras import backend as K
-from keras.applications import vgg19
 from keras.layers import Input, AveragePooling2D
 from keras.models import Model
-from keras.preprocessing.image import load_img, img_to_array
 from scipy.misc import imread, imsave
 from scipy.optimize import fmin_l_bfgs_b
 
+from Utils.Clustering import kmeans
 from Utils.ImageUtils import *
+from Utils.Parser import parser
 
 args = parser.parse_args()
 
-style_img_path = args.style_image
-style_mask_path = args.style_mask
-target_mask_path = args.target_mask
+style_img_path = args.s_image
+style_mask_path = args.s_mask
+target_mask_path = args.t_mask
 content_img_path = args.content_image
-target_img_prefix = args.target_image_prefix
+target_img_prefix = args.t_image_gen
 use_content_img = content_img_path is not None
-
-num_labels = args.nlabels
-num_colors = 3  # RGB
-# determine image sizes based on target_mask
+num_labels = args.labels
+num_colors = 3
 ref_img = imread(target_mask_path)
 img_nrows, img_ncols = ref_img.shape[:2]
 
@@ -36,45 +29,9 @@ style_weight = 1.
 content_weight = 0.1 if use_content_img else 0
 
 content_feature_layers = ['block5_conv2']
-# To get better generation qualities, use more conv layers for style features
 style_feature_layers = ['block1_conv1', 'block2_conv1', 'block3_conv1',
                         'block4_conv1', 'block5_conv1']
 
-
-def load_mask_labels():
-    '''Load both target and style masks.
-    A mask image (nr x nc) with m labels/colors will be loaded
-    as a 4D boolean tensor: (1, m, nr, nc) for 'channels_first' or (1, nr, nc, m) for 'channels_last'
-    '''
-    target_mask_img = load_img(target_mask_path,
-                               target_size=(img_nrows, img_ncols))
-    target_mask_img = img_to_array(target_mask_img)
-    style_mask_img = load_img(style_mask_path,
-                              target_size=(img_nrows, img_ncols))
-    style_mask_img = img_to_array(style_mask_img)
-    if K.image_data_format() == 'channels_first':
-        mask_vecs = np.vstack([style_mask_img.reshape((3, -1)).T,
-                               target_mask_img.reshape((3, -1)).T])
-    else:
-        mask_vecs = np.vstack([style_mask_img.reshape((-1, 3)),
-                               target_mask_img.reshape((-1, 3))])
-
-    labels = kmeans(mask_vecs, num_labels)
-    style_mask_label = labels[:img_nrows *
-                              img_ncols].reshape((img_nrows, img_ncols))
-    target_mask_label = labels[img_nrows *
-                               img_ncols:].reshape((img_nrows, img_ncols))
-
-    stack_axis = 0 if K.image_data_format() == 'channels_first' else -1
-    style_mask = np.stack([style_mask_label == r for r in range(num_labels)],
-                          axis=stack_axis)
-    target_mask = np.stack([target_mask_label == r for r in range(num_labels)],
-                           axis=stack_axis)
-
-    return (np.expand_dims(style_mask, axis=0),
-            np.expand_dims(target_mask, axis=0))
-
-# Create tensor variables for images
 if K.image_data_format() == 'channels_first':
     shape = (1, num_colors, img_nrows, img_ncols)
 else:
@@ -89,20 +46,39 @@ else:
 
 images = K.concatenate([style_image, target_image, content_image], axis=0)
 
-# Create tensor variables for masks
-raw_style_mask, raw_target_mask = load_mask_labels()
+
+def labelize():
+    target_mask_img = load_img(target_mask_path, target_size=(img_nrows, img_ncols))
+    target_mask_img = img_to_array(target_mask_img)
+    style_mask_img = load_img(style_mask_path, target_size=(img_nrows, img_ncols))
+    style_mask_img = img_to_array(style_mask_img)
+    if K.image_data_format() == 'channels_first':
+        mask_vecs = np.vstack([style_mask_img.reshape((3, -1)).T,
+                               target_mask_img.reshape((3, -1)).T])
+    else:
+        mask_vecs = np.vstack([style_mask_img.reshape((-1, 3)),
+                               target_mask_img.reshape((-1, 3))])
+
+    labels = kmeans(mask_vecs, num_labels)
+    style_mask_label = labels[:img_nrows * img_ncols].reshape((img_nrows, img_ncols))
+    target_mask_label = labels[img_nrows * img_ncols:].reshape((img_nrows, img_ncols))
+
+    stack_axis = 0 if K.image_data_format() == 'channels_first' else -1
+    style_mask = np.stack([style_mask_label == r for r in range(num_labels)], axis=stack_axis)
+    target_mask = np.stack([target_mask_label == r for r in range(num_labels)], axis=stack_axis)
+
+    return (np.expand_dims(style_mask, axis=0),
+            np.expand_dims(target_mask, axis=0))
+
+raw_style_mask, raw_target_mask = labelize()
 style_mask = K.variable(raw_style_mask.astype('float32'))
 target_mask = K.variable(raw_target_mask.astype('float32'))
 masks = K.concatenate([style_mask, target_mask], axis=0)
 
-# index constants for images and tasks variables
 STYLE, TARGET, CONTENT = 0, 1, 2
 
-# Build image model, mask model and use layer outputs as features
-# image model as VGG19
 image_model = vgg19.VGG19(include_top=False, input_tensor=images)
 
-# mask model as a series of pooling
 mask_input = Input(tensor=masks, shape=(None, None, None), name='mask_input')
 x = mask_input
 for layer in image_model.layers[1:]:
@@ -114,7 +90,6 @@ for layer in image_model.layers[1:]:
         x = AveragePooling2D((2, 2), name=name)(x)
 mask_model = Model(mask_input, x)
 
-# Collect features from image_model and task_model
 image_features = {}
 mask_features = {}
 for img_layer, mask_layer in zip(image_model.layers, mask_model.layers):
@@ -133,11 +108,7 @@ def gram_matrix(x):
     gram = K.dot(features, K.transpose(features))
     return gram
 
-
-def region_style_loss(style_image, target_image, style_mask, target_mask):
-    '''Calculate style loss between style_image and target_image,
-    for one common region specified by their (boolean) masks
-    '''
+def regionLoss(style_image, target_image, style_mask, target_mask):
     assert 3 == K.ndim(style_image) == K.ndim(target_image)
     assert 2 == K.ndim(style_mask) == K.ndim(target_mask)
     if K.image_data_format() == 'channels_first':
@@ -155,11 +126,7 @@ def region_style_loss(style_image, target_image, style_mask, target_mask):
     c = gram_matrix(masked_target) / K.mean(target_mask) / num_channels
     return K.mean(K.square(s - c))
 
-
-def style_loss(style_image, target_image, style_masks, target_masks):
-    '''Calculate style loss between style_image and target_image,
-    in all regions.
-    '''
+def styleLoss(style_image, target_image, style_masks, target_masks):
     assert 3 == K.ndim(style_image) == K.ndim(target_image)
     assert 3 == K.ndim(style_masks) == K.ndim(target_masks)
     loss = K.variable(0)
@@ -170,12 +137,11 @@ def style_loss(style_image, target_image, style_masks, target_masks):
         else:
             style_mask = style_masks[:, :, i]
             target_mask = target_masks[:, :, i]
-        loss += region_style_loss(style_image,
-                                  target_image, style_mask, target_mask)
+        loss += regionLoss(style_image,
+                           target_image, style_mask, target_mask)
     return loss
 
-
-def content_loss(content_image, target_image):
+def contentLoss(content_image, target_image):
     return K.sum(K.square(target_image - content_image))
 
 
@@ -193,20 +159,21 @@ def total_variation_loss(x):
                      x[:, :img_nrows - 1, 1:, :])
     return K.sum(K.pow(a + b, 1.25))
 
+
 # Overall loss is the weighted sum of content_loss, style_loss and tv_loss
 # Each individual loss uses features from image/mask models.
 loss = K.variable(0)
 for layer in content_feature_layers:
     content_feat = image_features[layer][CONTENT, :, :, :]
     target_feat = image_features[layer][TARGET, :, :, :]
-    loss += content_weight * content_loss(content_feat, target_feat)
+    loss += content_weight * contentLoss(content_feat, target_feat)
 
 for layer in style_feature_layers:
     style_feat = image_features[layer][STYLE, :, :, :]
     target_feat = image_features[layer][TARGET, :, :, :]
     style_masks = mask_features[layer][STYLE, :, :, :]
     target_masks = mask_features[layer][TARGET, :, :, :]
-    sl = style_loss(style_feat, target_feat, style_masks, target_masks)
+    sl = styleLoss(style_feat, target_feat, style_masks, target_masks)
     loss += (style_weight / len(style_feature_layers)) * sl
 
 loss += total_variation_weight * total_variation_loss(target_image)
@@ -221,8 +188,7 @@ else:
 
 f_outputs = K.function([target_image], outputs)
 
-
-def eval_loss_and_grads(x):
+def lossEvaluation(x):
     if K.image_data_format() == 'channels_first':
         x = x.reshape((1, 3, img_nrows, img_ncols))
     else:
@@ -237,14 +203,13 @@ def eval_loss_and_grads(x):
 
 
 class Evaluator(object):
-
     def __init__(self):
         self.loss_value = None
         self.grads_values = None
 
     def loss(self, x):
         assert self.loss_value is None
-        loss_value, grad_values = eval_loss_and_grads(x)
+        loss_value, grad_values = lossEvaluation(x)
         self.loss_value = loss_value
         self.grad_values = grad_values
         return self.loss_value
@@ -264,8 +229,8 @@ if K.image_data_format() == 'channels_first':
 else:
     x = np.random.uniform(0, 255, (1, img_nrows, img_ncols, 3)) - 128.
 
-for i in range(50):
-    print('Start of iteration', i)
+for i in range(25):
+    print('Iteration', i)
     start_time = time.time()
     x, min_val, info = fmin_l_bfgs_b(evaluator.loss, x.flatten(),
                                      fprime=evaluator.grads, maxfun=20)
@@ -275,5 +240,3 @@ for i in range(50):
     fname = target_img_prefix + '_at_iteration_%d.png' % i
     imsave(fname, img)
     end_time = time.time()
-    print('Image saved as', fname)
-print('Iteration %d completed in %ds' % (i, end_time - start_time))
